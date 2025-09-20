@@ -1,4 +1,4 @@
-export type MediaType = 'image' | 'video' | 'audio' | 'document';
+export type MediaType = 'image' | 'video' | 'audio' | 'document' | 'other';
 
 export interface LibraryItem {
   id: string;
@@ -8,6 +8,9 @@ export interface LibraryItem {
   tags: string[];
   url: string;
   content?: string; // For text-based content
+  source: 'drive' | 'local';
+  webViewLink?: string; // Direct link to open in Google Drive
+  iconLink?: string; // A link to the file's icon
 }
 
 export interface SearchResult extends LibraryItem {}

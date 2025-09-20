@@ -1,13 +1,9 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { GOOGLE_API_KEY } from "../config";
 
-// Fix: Per guidelines, initialize GoogleGenAI with the API key from environment variables.
-// Hardcoded API key has been removed. The API key is assumed to be pre-configured and 
-// available in `process.env.API_KEY`.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+const ai = new GoogleGenAI({ apiKey: GOOGLE_API_KEY });
 
 export const generateSearchQueries = async (text: string): Promise<string[]> => {
-  // Fix: Removed explicit check for API_KEY. The application assumes the API key is
-  // available. The try-catch block will handle potential errors during API calls.
   try {
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",

@@ -8,18 +8,19 @@ interface ResultCardProps {
 }
 
 const typeIconMap = {
-  image: <ImageIcon className="w-6 h-6 text-brand-blue" />,
-  video: <VideoIcon className="w-6 h-6 text-rose-500" />,
-  audio: <AudioIcon className="w-6 h-6 text-amber-500" />,
-  document: <FileIcon className="w-6 h-6 text-emerald-500" />,
+  image: <ImageIcon className="w-5 h-5 text-blue-400" />,
+  video: <VideoIcon className="w-5 h-5 text-rose-400" />,
+  audio: <AudioIcon className="w-5 h-5 text-amber-400" />,
+  document: <FileIcon className="w-5 h-5 text-emerald-400" />,
+  other: <FileIcon className="w-5 h-5 text-gray-400" />,
 };
 
 export const ResultCard: React.FC<ResultCardProps> = ({ result, onClick }) => {
-  const isDriveFile = result.id.startsWith('drive-');
+  const isDriveFile = result.source === 'drive';
 
   return (
     <div
-      className="bg-gray-800 rounded-lg overflow-hidden group cursor-pointer transition-all duration-300 hover:shadow-lg hover:shadow-brand-purple/20 hover:-translate-y-1"
+      className="bg-gray-800 rounded-lg overflow-hidden group cursor-pointer transition-all duration-300 hover:shadow-lg hover:shadow-purple-500/20 hover:-translate-y-1"
       onClick={() => onClick(result)}
     >
       <div className="relative aspect-video">
@@ -27,7 +28,11 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onClick }) => {
           <img src={result.url} alt={result.title} className="w-full h-full object-cover" />
         ) : (
           <div className="w-full h-full bg-gray-700 flex items-center justify-center">
-            {typeIconMap[result.type]}
+             {isDriveFile && result.iconLink ? (
+                <img src={result.iconLink} alt="file icon" className="w-12 h-12" />
+             ) : (
+                typeIconMap[result.type]
+             )}
           </div>
         )}
         <div className="absolute inset-0 bg-black/20 group-hover:bg-black/40 transition-colors duration-300" />
@@ -39,10 +44,14 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onClick }) => {
       </div>
       <div className="p-3">
         <div className="flex items-center gap-2 mb-1">
-            {typeIconMap[result.type]}
+             {isDriveFile && result.iconLink ? (
+                <img src={result.iconLink} alt="file icon" className="w-5 h-5" />
+             ) : (
+                typeIconMap[result.type]
+             )}
             <h3 className="font-semibold text-sm truncate text-gray-200 group-hover:text-white transition-colors">{result.title}</h3>
         </div>
-        <p className="text-xs text-gray-400 line-clamp-2">{result.description}</p>
+        <p className="text-xs text-gray-400 line-clamp-2">{result.description || 'No description available.'}</p>
       </div>
     </div>
   );
