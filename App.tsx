@@ -71,18 +71,12 @@ function App() {
       };
       setUserProfile(profile);
       
-      driveService.initTokenClient(async (tokenResponse) => {
-        if (tokenResponse.error) {
-           setError(`Authorization error: ${tokenResponse.error_description}`);
-           setAppState(AppState.LOGIN); // Go back to login on auth error
-           return;
-        }
-        if (driveFolder) {
-           handleFolderChosen(driveFolder);
-        } else {
-           setAppState(AppState.PICKER);
-        }
-      });
+      // After login, proceed to picker or ready state. Token will be requested on user action.
+      if (driveFolder) {
+        setAppState(AppState.PICKER); // Go to picker to re-confirm or change folder with token.
+      } else {
+        setAppState(AppState.PICKER);
+      }
 
     } catch (e) {
       console.error('Login Error:', e);
@@ -107,9 +101,13 @@ function App() {
   }, [appState, handleCredentialResponse]);
 
   const handleConnectFolder = () => {
-    driveService.showPicker((doc) => {
+    // This function is now called on button click, which allows the popup.
+    // It requests the token and shows the picker in one flow.
+    driveService.getAccessTokenAndShowPicker((doc) => {
       const folder = { id: doc.id, name: doc.name };
       handleFolderChosen(folder);
+    }, (err) => {
+       setError(`Authorization failed: ${err.message || 'Please try again.'}`);
     });
   };
 
@@ -196,6 +194,11 @@ function App() {
         <p className="text-gray-400 mb-8">Sign in to connect your personal library.</p>
         <div ref={loginButtonContainerRef}></div>
         {error && <p className="text-rose-500 mt-4 max-w-md">{error}</p>}
+        <div className="mt-8 p-4 bg-gray-800 rounded-lg text-xs text-left max-w-md w-full">
+          <p className="font-bold text-gray-300 mb-2 text-center">Configuration Help</p>
+          <p className="text-gray-400">If you see an "origin not allowed" error, make sure this exact URL is added to your Google Cloud Console's "Authorized JavaScript origins":</p>
+          <p className="font-mono bg-gray-900 p-2 rounded mt-1 select-all text-center text-white">{window.location.origin}</p>
+        </div>
       </div>
     );
   }

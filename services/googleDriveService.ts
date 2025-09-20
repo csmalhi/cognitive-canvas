@@ -15,48 +15,57 @@ export { GOOGLE_CLIENT_ID };
 
 /**
  * Initializes the GAPI client, waiting for the gapi script to be loaded by index.html.
- * This function polls for the `gapi` object and then initializes the client.
+ * This function polls for the `gapi` object and then initializes the client library.
  */
 export const initGapiClient = (): Promise<void> => {
     return new Promise((resolve, reject) => {
         const poll = setInterval(() => {
             if (window.gapi && window.gapi.load) {
                 clearInterval(poll);
-                window.gapi.load('client:picker', () => {
-                    window.gapi.client.init({
-                        apiKey: GOOGLE_API_KEY,
-                        discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
-                    }).then(
-                        () => resolve(),
-                        (error: any) => {
-                            console.error("GAPI client initialization failed", error);
-                            reject(error);
-                        }
-                    );
+                // Load only the 'client' library for Drive API calls.
+                // The 'picker' library will be loaded on-demand.
+                window.gapi.load('client', {
+                    callback: () => {
+                        window.gapi.client.init({
+                            apiKey: GOOGLE_API_KEY,
+                            discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
+                        }).then(
+                            () => resolve(),
+                            (error: any) => {
+                                console.error("GAPI client initialization failed", error);
+                                reject(error);
+                            }
+                        );
+                    },
+                    onerror: (error: any) => {
+                        console.error("GAPI library loading failed", error);
+                        reject(new Error("Failed to load GAPI client library."));
+                    },
                 });
             }
         }, 100);
+
+        // Add a timeout to prevent the polling from running indefinitely
+        setTimeout(() => {
+            clearInterval(poll);
+            if (!window.gapi || !window.gapi.load) {
+                reject(new Error("Google API script failed to load in a reasonable time."));
+            }
+        }, 10000);
     });
 };
 
-/**
- * Initializes the Google Identity Services token client.
- */
-export const initTokenClient = (callback: (tokenResponse: any) => void) => {
-    window.tokenClient = window.google.accounts.oauth2.initTokenClient({
-        client_id: GOOGLE_CLIENT_ID,
-        scope: GOOGLE_DRIVE_SCOPE,
-        callback: callback,
-    });
-    // Immediately request token after initialization
-    window.tokenClient.requestAccessToken({ prompt: '' });
-};
 
 /**
  * Shows the Google Picker UI for folder selection.
+ * This is now an internal function called after a token is successfully acquired and the picker library is loaded.
  */
-export const showPicker = (callback: (doc: any) => void) => {
+const showPicker = (callback: (doc: any) => void) => {
     const accessToken = window.gapi.client.getToken().access_token;
+    if (!accessToken) {
+        console.error("Cannot show picker: No access token available.");
+        return;
+    }
     const view = new window.google.picker.View(window.google.picker.ViewId.FOLDERS);
     view.setMimeTypes("application/vnd.google-apps.folder");
 
@@ -74,6 +83,36 @@ export const showPicker = (callback: (doc: any) => void) => {
         .build();
     picker.setVisible(true);
 };
+
+/**
+ * Initializes a token client, requests an access token, loads the picker library, and then shows the picker.
+ * This entire flow is triggered by a user action (e.g., a button click) to prevent popup blockers.
+ * @param pickerCallback The function to call when a folder has been picked.
+ * @param errorCallback The function to call if token authorization fails.
+ */
+export const getAccessTokenAndShowPicker = (
+    pickerCallback: (doc: any) => void,
+    errorCallback: (error: any) => void
+) => {
+    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: GOOGLE_DRIVE_SCOPE,
+        callback: (tokenResponse: any) => {
+            if (tokenResponse.error) {
+                console.error('Token error:', tokenResponse);
+                errorCallback(new Error(tokenResponse.error_description || 'Unknown authorization error.'));
+                return;
+            }
+            // A token has been acquired. Now, load the picker library and then show the picker.
+            window.gapi.load('picker', () => {
+                showPicker(pickerCallback);
+            });
+        },
+    });
+    // Request the access token. This will open a popup if consent is needed.
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+};
+
 
 const getMediaType = (mimeType: string): MediaType => {
     if (mimeType.startsWith('image/')) return 'image';

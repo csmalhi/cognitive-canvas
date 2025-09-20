@@ -1,7 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { GOOGLE_API_KEY } from "../config";
 
-const ai = new GoogleGenAI({ apiKey: GOOGLE_API_KEY });
+// Fix: Per coding guidelines, the API key must be obtained exclusively from the environment variable `process.env.API_KEY`.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const generateSearchQueries = async (text: string): Promise<string[]> => {
   try {
