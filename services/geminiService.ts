@@ -1,27 +1,13 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-// Use the API Key provided by the user. In a production app, this should
-// be managed securely, for example, through environment variables.
-export const API_KEY = "AIzaSyAHHm1Tsy8Sd9KrKhlGbmq7EaA2y7wTaDI";
-
-if (!API_KEY) {
-  // This warning is unlikely to be triggered now but is kept for good practice.
-  console.warn("API_KEY is not set.");
-}
-
-// The API key might be undefined here if not set, but the GoogleGenAI client can be initialized.
-// Subsequent API calls will fail, which is handled in the functions using it.
-const ai = new GoogleGenAI({ apiKey: API_KEY });
+// Fix: Per guidelines, initialize GoogleGenAI with the API key from environment variables.
+// Hardcoded API key has been removed. The API key is assumed to be pre-configured and 
+// available in `process.env.API_KEY`.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
 
 export const generateSearchQueries = async (text: string): Promise<string[]> => {
-  if (!API_KEY) {
-    console.log("No API key, returning mock queries.");
-    // Return mock data if API key is not available
-    const keywords = text.toLowerCase().match(/\b(\w+)\b/g) || [];
-    const uniqueKeywords = [...new Set(keywords)];
-    return uniqueKeywords.slice(0, 3);
-  }
-  
+  // Fix: Removed explicit check for API_KEY. The application assumes the API key is
+  // available. The try-catch block will handle potential errors during API calls.
   try {
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
@@ -49,6 +35,9 @@ export const generateSearchQueries = async (text: string): Promise<string[]> => 
   } catch (error) {
     console.error("Error generating search queries with Gemini:", error);
     // Fallback to simple keyword extraction on error
-    return text.toLowerCase().split(' ').slice(0, 3);
+    console.log("Falling back to simple keyword extraction due to an error with the Gemini API.");
+    const keywords = text.toLowerCase().match(/\b(\w+)\b/g) || [];
+    const uniqueKeywords = [...new Set(keywords)];
+    return uniqueKeywords.slice(0, 3);
   }
 };

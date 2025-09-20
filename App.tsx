@@ -1,14 +1,26 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { SearchResult, MediaType, LibraryItem } from './types';
-import { useSpeechRecognition } from './hooks/useSpeechRecognition';
-import { generateSearchQueries, API_KEY } from './services/geminiService';
-import { MicIcon, SearchIcon, DriveIcon } from './components/icons';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { SearchIcon, MicIcon, DriveIcon } from './components/icons';
 import { ResultCard } from './components/ResultCard';
 import { FullScreenModal } from './components/FullScreenModal';
-import { jwtDecode } from 'jwt-decode'; // Using a simple decoder for the JWT from Google
+import { useSpeechRecognition } from './hooks/useSpeechRecognition';
+import { generateSearchQueries } from './services/geminiService';
+import { mockLibrary } from './data/mockLibrary';
+import { SearchResult, LibraryItem } from './types';
+import { jwtDecode, JwtPayload } from 'jwt-decode';
+import { GOOGLE_CLIENT_ID, GOOGLE_API_KEY, GOOGLE_DRIVE_SCOPE } from './config';
 
-const CLIENT_ID = '679495081221-mpudno83nmp2146rshrueaff054735d7.apps.googleusercontent.com';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+interface UserProfile {
+  name: string;
+  email: string;
+  picture: string;
+}
+
+interface DriveFolder {
+  id: string;
+  name: string;
+}
+
+// Global gapi/gis types for TypeScript
 declare global {
   interface Window {
     google: any;
@@ -17,368 +29,370 @@ declare global {
 }
 
 const App: React.FC = () => {
-  const [view, setView] = useState<'main' | 'library'>('main');
+  // App State
+  const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
-  const [manualQuery, setManualQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  
-  const [user, setUser] = useState<any>(null);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+
+  // Auth & Drive State
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [tokenClient, setTokenClient] = useState<any>(null);
+  const [isGisReady, setIsGisReady] = useState(false);
+  const [isGapiReady, setIsGapiReady] = useState(false);
+  const [isAuthorizing, setIsAuthorizing] = useState(false);
+  const [driveFolder, setDriveFolder] = useState<DriveFolder | null>(null);
   const [driveFiles, setDriveFiles] = useState<LibraryItem[]>([]);
-  const [isAuthorized, setIsAuthorized] = useState(false);
-  const [authStatus, setAuthStatus] = useState('loading'); // loading, unauthenticated, authenticated
-  const [selectedFolder, setSelectedFolder] = useState<{id: string, name: string} | null>(null);
-  const tokenClient = useRef<any>(null);
-  const signInContainerRef = useRef<HTMLDivElement>(null);
-  const searchTimeoutRef = useRef<number | null>(null);
 
-  const mapDriveFileToLibraryItem = (file: any): LibraryItem => {
-    let type: MediaType = 'document';
-    if (file.mimeType?.startsWith('image/')) type = 'image';
-    else if (file.mimeType?.startsWith('video/')) type = 'video';
-    else if (file.mimeType?.startsWith('audio/')) type = 'audio';
-  
-    return {
-      id: `drive-${file.id}`,
-      type: type,
-      title: file.name,
-      description: file.description || `A file from Google Drive.`,
-      tags: ['drive', file.mimeType],
-      url: type === 'image' && file.thumbnailLink ? file.thumbnailLink.replace('=s220', '=s800') : file.webViewLink,
-      content: `Google Drive File: ${file.name}`
-    };
-  };
+  // Refs
+  const signInButtonRef = useRef<HTMLDivElement>(null);
 
-  const listDriveFiles = useCallback(async (folderId: string) => {
-    if (!folderId) return;
-    setIsLoading(true);
-    try {
-      const response = await window.gapi.client.drive.files.list({
-        pageSize: 100,
-        fields: 'files(id, name, mimeType, description, webViewLink, thumbnailLink)',
-        q: `'${folderId}' in parents and trashed = false`,
-      });
-      const files = response.result.files.map(mapDriveFileToLibraryItem);
-      setDriveFiles(files);
-    } catch (error) {
-      console.error('Error fetching Drive files:', error);
-    }
-    setIsLoading(false);
-  }, []);
-
-  const handleAuthCallback = useCallback(async (tokenResponse: any) => {
-    if (tokenResponse.error) {
-      console.error(tokenResponse.error);
+  // --- Search Logic ---
+  const performSearch = useCallback((searchQuery: string) => {
+    setIsInitialLoad(false);
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
       return;
     }
-    window.gapi.client.setToken(tokenResponse);
-    setIsAuthorized(true);
-    // Check for a saved folder after authorization is confirmed
-    const savedFolderJson = localStorage.getItem('cognitiveCanvasFolder');
-    if (savedFolderJson) {
-        const savedFolder = JSON.parse(savedFolderJson);
-        setSelectedFolder(savedFolder);
-        await listDriveFiles(savedFolder.id);
+    const lowerCaseQuery = searchQuery.toLowerCase();
+    const allItems = [...mockLibrary, ...driveFiles];
+    const results = allItems.filter(item =>
+      item.title.toLowerCase().includes(lowerCaseQuery) ||
+      item.description.toLowerCase().includes(lowerCaseQuery) ||
+      item.tags.some(tag => tag.toLowerCase().includes(lowerCaseQuery))
+    );
+    setSearchResults(results);
+  }, [driveFiles]);
+
+  const handleSmartSearch = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+    setIsLoading(true);
+    const keywords = await generateSearchQueries(text);
+    let finalQuery = text;
+    if (keywords.length > 0) {
+      finalQuery = keywords.join(' ');
+      setQuery(finalQuery);
     }
-  }, [listDriveFiles]);
+    performSearch(finalQuery);
+    setIsLoading(false);
+  }, [performSearch]);
 
-  const handleCredentialResponse = useCallback((response: any) => {
-    const userProfile = jwtDecode(response.credential);
-    setUser(userProfile);
-    setAuthStatus('authenticated');
+  const handleFinalTranscript = useCallback((transcript: string) => {
+    setQuery(transcript);
+    handleSmartSearch(transcript);
+  }, [handleSmartSearch]);
 
-    tokenClient.current = window.google.accounts.oauth2.initTokenClient({
-        client_id: CLIENT_ID,
-        scope: DRIVE_SCOPE,
-        callback: handleAuthCallback,
-    });
-    tokenClient.current.requestAccessToken();
-  }, [handleAuthCallback]);
+  const { transcript, isListening, startListening, stopListening } = useSpeechRecognition(handleFinalTranscript);
 
   useEffect(() => {
-    const gsiScript = document.createElement('script');
-    gsiScript.src = 'https://accounts.google.com/gsi/client';
-    gsiScript.async = true;
-    gsiScript.defer = true;
-    gsiScript.onload = () => {
-      try {
-        window.google.accounts.id.initialize({
-          client_id: CLIENT_ID,
-          callback: handleCredentialResponse,
-        });
-        setAuthStatus('unauthenticated');
-      } catch (error) {
-        console.error("Error initializing Google Identity Services:", error);
-        setAuthStatus('error');
-      }
-    };
-    gsiScript.onerror = () => {
-        console.error("Failed to load Google Identity Services script.");
-        setAuthStatus('error');
-    };
-    document.body.appendChild(gsiScript);
-
-    const gapiScript = document.createElement('script');
-    gapiScript.src = 'https://apis.google.com/js/api.js';
-    gapiScript.async = true;
-    gapiScript.defer = true;
-    gapiScript.onload = () => {
-      try {
-        window.gapi.load('client:picker', () => {
-           window.gapi.client.init({
-             discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
-           }).catch(e => console.error('Error initializing GAPI client:', e));
-        });
-      } catch (error) {
-        console.error("Error loading GAPI client:", error);
-      }
-    };
-    gapiScript.onerror = () => {
-        console.error("Failed to load Google API Client script.");
-    };
-    document.body.appendChild(gapiScript);
-
-    return () => {
-      document.body.removeChild(gsiScript);
-      document.body.removeChild(gapiScript);
-    }
-  }, [handleCredentialResponse]);
+    if (isListening) return;
+    const handler = setTimeout(() => {
+      performSearch(query);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [query, isListening, performSearch]);
 
   useEffect(() => {
-    if (authStatus === 'unauthenticated' && signInContainerRef.current) {
-        if (window.google?.accounts?.id) {
-            window.google.accounts.id.renderButton(
-                signInContainerRef.current,
-                {
-                    type: 'standard',
-                    shape: 'rectangular',
-                    theme: 'outline',
-                    text: 'signin_with',
-                    size: 'large',
-                    logo_alignment: 'left',
-                }
-            );
-        }
+    if (isListening) {
+      setQuery(transcript);
     }
-  }, [authStatus]);
+  }, [transcript, isListening]);
 
-
-  const handleLogout = () => {
-    setUser(null);
-    setIsAuthorized(false);
-    setDriveFiles([]);
-    setSearchResults([]);
-    setSelectedFolder(null);
-    localStorage.removeItem('cognitiveCanvasFolder');
-    setAuthStatus('unauthenticated');
-    window.google.accounts.id.disableAutoSelect();
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    handleSmartSearch(query);
   };
 
-  const pickerCallback = (data: any) => {
-    if (data.action === window.google.picker.Action.PICKED) {
-      const folder = data.docs[0];
-      const folderData = { id: folder.id, name: folder.name };
-      setSelectedFolder(folderData);
-      localStorage.setItem('cognitiveCanvasFolder', JSON.stringify(folderData));
-      listDriveFiles(folder.id);
+  // --- Auth & Drive Logic ---
+
+  // 1. Load Google API Scripts
+  useEffect(() => {
+    const gapiUrl = 'https://apis.google.com/js/api.js';
+    const gisUrl = 'https://accounts.google.com/gsi/client';
+
+    const gapiScript = document.createElement('script');
+    gapiScript.src = gapiUrl;
+    gapiScript.async = true;
+    gapiScript.defer = true;
+    gapiScript.onload = () => window.gapi.load('client:picker', () => setIsGapiReady(true));
+    document.body.appendChild(gapiScript);
+
+    const gisScript = document.createElement('script');
+    gisScript.src = gisUrl;
+    gisScript.async = true;
+    gisScript.defer = true;
+    gisScript.onload = () => setIsGisReady(true);
+    document.body.appendChild(gisScript);
+
+    return () => {
+      document.body.removeChild(gapiScript);
+      document.body.removeChild(gisScript);
+    };
+  }, []);
+
+  // 2. Initialize Google Identity Services (Sign-in)
+  useEffect(() => {
+    if (!isGisReady) return;
+    try {
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleAuthCallback,
+      });
+
+      if (signInButtonRef.current) {
+        window.google.accounts.id.renderButton(signInButtonRef.current, {
+          theme: 'outline',
+          size: 'large',
+          type: 'standard',
+          text: 'signin_with',
+        });
+      }
+
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: GOOGLE_DRIVE_SCOPE,
+        callback: (tokenResponse: any) => {
+            if (tokenResponse.error) {
+                console.error("Authorization error:", tokenResponse.error);
+                setIsAuthorizing(false);
+            } else {
+                 window.gapi.client.setToken(tokenResponse);
+                 setIsAuthorizing(false);
+                 // Load saved folder from localStorage after successful authorization
+                const savedFolder = localStorage.getItem('driveFolder');
+                if (savedFolder) {
+                  const folder = JSON.parse(savedFolder);
+                  setDriveFolder(folder);
+                  fetchDriveFiles(folder.id);
+                }
+            }
+        },
+      });
+      setTokenClient(client);
+
+    } catch (error) {
+      console.error("Error initializing Google Identity Services:", error);
     }
+  }, [isGisReady]);
+
+  // 3. Authorize Google Drive after user signs in
+  useEffect(() => {
+    if (userProfile && tokenClient && isGapiReady) {
+      const gapiToken = window.gapi.client.getToken();
+      if (!gapiToken) {
+        setIsAuthorizing(true);
+        tokenClient.requestAccessToken();
+      } else {
+         const savedFolder = localStorage.getItem('driveFolder');
+         if (savedFolder) {
+            const folder = JSON.parse(savedFolder);
+            setDriveFolder(folder);
+            fetchDriveFiles(folder.id);
+         }
+      }
+    }
+  }, [userProfile, tokenClient, isGapiReady]);
+
+  const handleAuthCallback = (response: any) => {
+    try {
+      const decoded: JwtPayload & { name: string; email: string; picture: string } = jwtDecode(response.credential);
+      setUserProfile({
+        name: decoded.name,
+        email: decoded.email,
+        picture: decoded.picture,
+      });
+    } catch (error) {
+      console.error("Error decoding JWT:", error);
+    }
+  };
+
+  const handleLogout = () => {
+    setUserProfile(null);
+    setDriveFolder(null);
+    setDriveFiles([]);
+    localStorage.removeItem('driveFolder');
+    window.google?.accounts.id.disableAutoSelect();
   };
 
   const showPicker = () => {
-    if (!window.gapi || !isAuthorized) return;
     const token = window.gapi.client.getToken();
     if (!token) {
-      console.error("Authentication token not found.");
-      // Attempt to re-authorize
-      tokenClient.current.requestAccessToken();
-      return;
+        console.error("Picker requires an access token.");
+        tokenClient.requestAccessToken(); // Re-auth if token is missing
+        return;
     }
-    const accessToken = token.access_token;
     const view = new window.google.picker.View(window.google.picker.ViewId.FOLDERS);
     view.setMimeTypes("application/vnd.google-apps.folder");
     
     const picker = new window.google.picker.PickerBuilder()
-        .enableFeature(window.google.picker.Feature.NAV_HIDDEN)
-        .setAppId(CLIENT_ID.split('-')[0])
-        .setOAuthToken(accessToken)
-        .setDeveloperKey(API_KEY)
-        .addView(view)
-        .setCallback(pickerCallback)
-        .build();
+      .enableFeature(window.google.picker.Feature.NAV_HIDDEN)
+      .setAppId(GOOGLE_CLIENT_ID.split('-')[0])
+      .setOAuthToken(token.access_token)
+      .addView(view)
+      .setDeveloperKey(GOOGLE_API_KEY)
+      .setCallback(handlePickerCallback)
+      .build();
     picker.setVisible(true);
   };
 
-  const performSearch = useCallback((terms: string[]) => {
-    if (terms.length === 0) return;
+  const handlePickerCallback = (data: any) => {
+    if (data.action === window.google.picker.Action.PICKED) {
+      const folder = data.docs[0];
+      const selectedFolder = { id: folder.id, name: folder.name };
+      setDriveFolder(selectedFolder);
+      localStorage.setItem('driveFolder', JSON.stringify(selectedFolder));
+      fetchDriveFiles(folder.id);
+    }
+  };
+
+    const mapDriveFileToSearchResult = (file: any): LibraryItem => {
+        let type: LibraryItem['type'] = 'document';
+        if (file.mimeType.startsWith('image/')) type = 'image';
+        else if (file.mimeType.startsWith('video/')) type = 'video';
+        else if (file.mimeType.startsWith('audio/')) type = 'audio';
+
+        return {
+            id: `drive-${file.id}`,
+            type: type,
+            title: file.name,
+            description: `A ${type} file from Google Drive.`,
+            tags: ['drive', type, ...file.name.toLowerCase().split(/[\s\.]+/)],
+            url: file.webViewLink,
+        };
+    };
+
+  const fetchDriveFiles = async (folderId: string) => {
     setIsLoading(true);
-
-    const lowerCaseTerms = terms.map(t => t.toLowerCase());
-    
-    const libraryResults = driveFiles.filter(item => {
-      return lowerCaseTerms.some(term => 
-        item.title.toLowerCase().includes(term) ||
-        item.description.toLowerCase().includes(term) ||
-        (item.content && item.content.toLowerCase().includes(term)) ||
-        item.tags.some(tag => tag.toLowerCase().includes(term))
-      );
-    });
-
-    const webImageResults: SearchResult[] = lowerCaseTerms.map(term => ({
-      id: `web-${term}`,
-      type: 'image',
-      title: `Web Search: ${term}`,
-      description: `An image from the web related to "${term}".`,
-      tags: ['web', 'image', term],
-      url: `https://picsum.photos/seed/${term}/400/300`,
-    }));
-
-    setSearchResults([...libraryResults, ...webImageResults]);
-    setIsLoading(false);
-  }, [driveFiles]);
-
-  const onFinalTranscript = useCallback((transcript: string) => {
-    if (transcript) {
-      setIsLoading(true);
-      generateSearchQueries(transcript)
-        .then(queries => {
-          if (queries.length > 0) {
-            performSearch(queries);
-          } else {
-            setIsLoading(false);
-          }
-        })
-        .catch(() => setIsLoading(false));
-    }
-  }, [performSearch]);
-
-  const { transcript, isListening, startListening, stopListening } = useSpeechRecognition(onFinalTranscript);
-  
-  const handleManualSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (manualQuery.trim()) {
-      performSearch(manualQuery.trim().split(' '));
-    }
-  };
-
-  const debouncedManualSearch = (query: string) => {
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current);
-    }
-    searchTimeoutRef.current = window.setTimeout(() => {
-      if (query.trim()) {
-        performSearch(query.trim().split(' '));
-      } else {
-        setSearchResults([]);
+    try {
+      const response = await window.gapi.client.drive.files.list({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: 'files(id, name, mimeType, webViewLink, iconLink)',
+        pageSize: 100
+      });
+      const files = response.result.files.map(mapDriveFileToSearchResult);
+      setDriveFiles(files);
+    } catch (error) {
+      console.error("Error fetching files from Google Drive:", error);
+      // If token expired, try to re-authenticate
+      if ((error as any).status === 401) {
+          tokenClient.requestAccessToken();
       }
-    }, 500);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleManualQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setManualQuery(e.target.value);
-    debouncedManualSearch(e.target.value);
-  }
+  // --- Render Logic ---
 
-  const LoginView = () => (
-    <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
-        <h1 className="text-4xl font-bold mb-2">Cognitive Canvas</h1>
-        <p className="text-gray-400 mb-8">Your real-time contextual assistant.</p>
-        {authStatus === 'loading' && <p>Loading...</p>}
-        {authStatus === 'error' && <p className="text-red-500">Error loading Google services. Please refresh.</p>}
-        {authStatus === 'unauthenticated' && <div ref={signInContainerRef} />}
-    </div>
-  );
-
-  if (!user) {
-    return <LoginView />;
-  }
-  
-  if (!selectedFolder) {
+  if (!userProfile) {
     return (
-        <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
-            <h1 className="text-3xl font-bold mb-4">Connect Your Library</h1>
-            <p className="text-gray-400 mb-8">Select a Google Drive folder to use as your personal library.</p>
-            <button
-                onClick={showPicker}
-                disabled={!isAuthorized}
-                className="inline-flex items-center gap-3 bg-brand-blue text-white font-semibold px-6 py-3 rounded-lg hover:bg-brand-blue/80 transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
-            >
-                <DriveIcon className="w-6 h-6" />
-                Connect Google Drive Folder
-            </button>
-            <p className="text-sm text-gray-500 mt-4">{!isAuthorized ? 'Authorizing with Google Drive...' : 'Ready to connect.'}</p>
-        </div>
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
+        <h1 className="text-4xl font-bold mb-2">Cognitive Canvas</h1>
+        <p className="text-gray-400 mb-8">Your intelligent media assistant.</p>
+        <div ref={signInButtonRef}></div>
+      </div>
     );
   }
 
+  if (!driveFolder) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white p-4 text-center">
+        <img src={userProfile.picture} alt="User" className="w-20 h-20 rounded-full mb-4 border-2 border-brand-purple" />
+        <h1 className="text-3xl font-bold mb-2">Welcome, {userProfile.name}!</h1>
+        <p className="text-gray-400 mb-8 max-w-md">To get started, connect a Google Drive folder to use as your personal media library.</p>
+        {isAuthorizing ? (
+            <p className="text-gray-400 italic">Authorizing with Google Drive...</p>
+        ) : (
+            <button
+            onClick={showPicker}
+            className="inline-flex items-center gap-3 bg-gray-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-gray-700 transition-colors shadow-lg"
+            >
+            <DriveIcon className="w-6 h-6" />
+            Connect Google Drive Folder
+            </button>
+        )}
+         <button onClick={handleLogout} className="text-sm text-gray-500 hover:text-gray-300 mt-8">Logout</button>
+      </div>
+    );
+  }
+
+
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
-       <header className="fixed top-0 left-0 right-0 bg-gray-900/80 backdrop-blur-md z-40">
-        <div className="container mx-auto px-4 py-3 flex justify-between items-center">
-        <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold from-brand-blue to-brand-purple bg-gradient-to-r bg-clip-text text-transparent">
+    <div className="bg-gray-900 min-h-screen text-white font-sans">
+      <style>{`
+        .from-brand-purple { --tw-gradient-from: #8B5CF6; --tw-gradient-to: rgba(139, 92, 246, 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
+        .to-brand-blue { --tw-gradient-to: #3B82F6; }
+        .text-brand-blue { color: #3B82F6; }
+        .bg-brand-blue { background-color: #3B82F6; }
+        .hover\\:bg-brand-blue\\/80:hover { background-color: rgba(59, 130, 246, 0.8); }
+        .border-brand-purple { border-color: #8B5CF6; }
+        .hover\\:shadow-brand-purple\\/20:hover { box-shadow: 0 10px 15px -3px rgba(139, 92, 246, 0.1), 0 4px 6px -2px rgba(139, 92, 246, 0.05); }
+        .bg-red-500 { background-color: #EF4444; }
+      `}</style>
+      <FullScreenModal result={selectedResult} onClose={() => setSelectedResult(null)} />
+      
+      <header className="sticky top-0 z-20 bg-gray-900/80 backdrop-blur-md">
+        <div className="container mx-auto px-4 py-3">
+           <div className="flex justify-between items-center mb-3">
+             <div className="flex items-center gap-2 text-sm text-gray-400">
+               <DriveIcon className="w-5 h-5 text-brand-blue" />
+               <span>{driveFolder.name}</span>
+             </div>
+             <div className="flex items-center gap-3">
+               <img src={userProfile.picture} alt={userProfile.name} className="w-8 h-8 rounded-full border-2 border-gray-700" />
+               <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-white">Logout</button>
+             </div>
+           </div>
+          <div className="max-w-2xl mx-auto">
+            <h1 className="text-3xl font-bold text-center mb-4 text-transparent bg-clip-text bg-gradient-to-r from-brand-purple to-brand-blue">
               Cognitive Canvas
             </h1>
-            <div className="flex items-center gap-2 text-sm bg-gray-800 px-3 py-1 rounded-full">
-                <DriveIcon className="w-4 h-4 text-gray-400"/>
-                <span className="text-gray-300">{selectedFolder.name}</span>
-            </div>
-        </div>
-          <div className="flex items-center gap-4">
-            {user && (
-                <div className="flex items-center gap-2 text-sm">
-                    <img src={user.picture} alt="user avatar" className="w-8 h-8 rounded-full" />
-                    <span className="text-gray-300 hidden sm:inline">{user.given_name}</span>
-                </div>
-            )}
-            <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-white">Logout</button>
+            <form onSubmit={handleSubmit} className="relative">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Describe what you're looking for..."
+                className="w-full bg-gray-800 border-2 border-gray-700 rounded-full py-3 pl-12 pr-20 text-white focus:outline-none focus:border-brand-purple transition-colors"
+              />
+              <div className="absolute left-4 top-1/2 -translate-y-1/2">
+                <SearchIcon className="w-6 h-6 text-gray-400" />
+              </div>
+              <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={isListening ? stopListening : startListening}
+                  className={`p-2 rounded-full transition-colors ${isListening ? 'bg-red-500 animate-pulse-fast' : 'bg-gray-700 hover:bg-gray-600'}`}
+                  aria-label={isListening ? 'Stop listening' : 'Start listening'}
+                >
+                  <MicIcon className="w-5 h-5 text-white" />
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       </header>
 
-      <main className="container mx-auto px-4 pt-24 flex-1">
-        <div className="flex justify-center mb-8">
-          <button
-            onClick={isListening ? stopListening : startListening}
-            className={`relative flex items-center justify-center w-24 h-24 rounded-full transition-colors duration-300 ${isListening ? 'bg-red-600 hover:bg-red-700' : 'bg-brand-blue hover:bg-brand-blue/80'}`}
-          >
-            <MicIcon className="w-10 h-10" />
-            {isListening && <div className="absolute inset-0 rounded-full bg-red-500/50 animate-pulse-fast"></div>}
-          </button>
-        </div>
-        <p className="text-center min-h-6 mb-8 text-gray-400 italic">{transcript || "Click the mic and start talking..."}</p>
-
-        <div className="relative mb-12">
-          <form onSubmit={handleManualSearch}>
-            <input
-              type="text"
-              value={manualQuery}
-              onChange={handleManualQueryChange}
-              placeholder="Or type your search here..."
-              className="w-full bg-gray-800 border-2 border-gray-700 rounded-full py-3 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-brand-purple focus:border-transparent"
-            />
-          </form>
-          <SearchIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 text-gray-400" />
-        </div>
-        
-        <div className="mb-4">
-          <button onClick={() => setView('main')} className={`px-4 py-2 rounded-t-lg ${view === 'main' ? 'bg-gray-800' : 'bg-gray-700/50'}`}>Search Results</button>
-          <button onClick={() => setView('library')} className={`px-4 py-2 rounded-t-lg ${view === 'library' ? 'bg-gray-800' : 'bg-gray-700/50'}`}>My Library</button>
-        </div>
-
-        <div className="bg-gray-800 p-4 rounded-b-lg rounded-tr-lg">
-            {isLoading && <p className="text-center">Searching...</p>}
-            {!isLoading && view === 'main' && searchResults.length === 0 && <p className="text-center text-gray-500">No search results yet. Speak or type to search.</p>}
-            {!isLoading && view === 'library' && driveFiles.length === 0 && <p className="text-center text-gray-500">Your connected library is empty.</p>}
-            
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                {(view === 'main' ? searchResults : driveFiles).map((result) => (
-                    <ResultCard key={result.id} result={result} onClick={setSelectedResult} />
-                ))}
-            </div>
-        </div>
+      <main className="container mx-auto px-4 py-8">
+        {isLoading ? (
+          <div className="text-center text-gray-400 py-10">Loading...</div>
+        ) : isInitialLoad ? (
+          <div className="text-center text-gray-400 py-10">
+            <p>Search your library or use your voice to find what you need.</p>
+          </div>
+        ) : searchResults.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+            {searchResults.map((result) => (
+              <ResultCard key={result.id} result={result} onClick={setSelectedResult} />
+            ))}
+          </div>
+        ) : (
+          <div className="text-center text-gray-400 py-10">
+            <p>No results found for "{query}". Try a different search.</p>
+          </div>
+        )}
       </main>
-
-      <FullScreenModal result={selectedResult} onClose={() => setSelectedResult(null)} />
     </div>
   );
 };
