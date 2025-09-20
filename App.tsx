@@ -1,5 +1,4 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { mockLibrary } from './data/mockLibrary';
 import { SearchResult, MediaType, LibraryItem } from './types';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { generateSearchQueries } from './services/geminiService';
@@ -28,6 +27,7 @@ const App: React.FC = () => {
   const [driveFiles, setDriveFiles] = useState<LibraryItem[]>([]);
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [authStatus, setAuthStatus] = useState('loading'); // loading, unauthenticated, authenticated
+  const [selectedFolder, setSelectedFolder] = useState<{id: string, name: string} | null>(null);
   const tokenClient = useRef<any>(null);
 
   const searchTimeoutRef = useRef<number | null>(null);
@@ -49,12 +49,14 @@ const App: React.FC = () => {
     };
   };
 
-  const listDriveFiles = useCallback(async () => {
+  const listDriveFiles = useCallback(async (folderId: string) => {
+    if (!folderId) return;
     setIsLoading(true);
     try {
       const response = await window.gapi.client.drive.files.list({
         pageSize: 100,
         fields: 'files(id, name, mimeType, description, webViewLink, thumbnailLink)',
+        q: `'${folderId}' in parents and trashed = false`,
       });
       const files = response.result.files.map(mapDriveFileToLibraryItem);
       setDriveFiles(files);
@@ -70,7 +72,13 @@ const App: React.FC = () => {
       return;
     }
     setIsAuthorized(true);
-    await listDriveFiles();
+    // Check for a saved folder after authorization is confirmed
+    const savedFolderJson = localStorage.getItem('cognitiveCanvasFolder');
+    if (savedFolderJson) {
+        const savedFolder = JSON.parse(savedFolderJson);
+        setSelectedFolder(savedFolder);
+        await listDriveFiles(savedFolder.id);
+    }
   }, [listDriveFiles]);
 
   const handleCredentialResponse = useCallback((response: any) => {
@@ -78,7 +86,6 @@ const App: React.FC = () => {
     setUser(userProfile);
     setAuthStatus('authenticated');
 
-    // After login, initialize token client and request Drive access
     tokenClient.current = window.google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
         scope: DRIVE_SCOPE,
@@ -88,43 +95,51 @@ const App: React.FC = () => {
   }, [handleAuthCallback]);
 
   useEffect(() => {
-    const loadGapi = () => {
-        window.gapi.load('client', async () => {
-            await window.gapi.client.init({
-                discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
-            });
+    const gsiScript = document.createElement('script');
+    gsiScript.src = 'https://accounts.google.com/gsi/client';
+    gsiScript.async = true;
+    gsiScript.defer = true;
+    gsiScript.onload = () => {
+      try {
+        window.google.accounts.id.initialize({
+          client_id: CLIENT_ID,
+          callback: handleCredentialResponse,
         });
-    }
-
-    const initializeGis = () => {
-        if (window.google) {
-            window.google.accounts.id.initialize({
-                client_id: CLIENT_ID,
-                callback: handleCredentialResponse,
-            });
-            setAuthStatus('unauthenticated');
-        } else {
-            setAuthStatus('error');
-        }
-    }
+        setAuthStatus('unauthenticated');
+      } catch (error) {
+        console.error("Error initializing Google Identity Services:", error);
+        setAuthStatus('error');
+      }
+    };
+    gsiScript.onerror = () => {
+        console.error("Failed to load Google Identity Services script.");
+        setAuthStatus('error');
+    };
+    document.body.appendChild(gsiScript);
 
     const gapiScript = document.createElement('script');
     gapiScript.src = 'https://apis.google.com/js/api.js';
     gapiScript.async = true;
     gapiScript.defer = true;
-    gapiScript.onload = loadGapi;
+    gapiScript.onload = () => {
+      try {
+        window.gapi.load('client:picker', () => {
+           window.gapi.client.init({
+             discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
+           }).catch(e => console.error('Error initializing GAPI client:', e));
+        });
+      } catch (error) {
+        console.error("Error loading GAPI client:", error);
+      }
+    };
+    gapiScript.onerror = () => {
+        console.error("Failed to load Google API Client script.");
+    };
     document.body.appendChild(gapiScript);
 
-    const gisScript = document.createElement('script');
-    gisScript.src = 'https://accounts.google.com/gsi/client';
-    gisScript.async = true;
-    gisScript.defer = true;
-    gisScript.onload = initializeGis;
-    document.body.appendChild(gisScript);
-    
     return () => {
-        document.body.removeChild(gapiScript);
-        document.body.removeChild(gisScript);
+      document.body.removeChild(gsiScript);
+      document.body.removeChild(gapiScript);
     }
   }, [handleCredentialResponse]);
 
@@ -134,8 +149,37 @@ const App: React.FC = () => {
     setIsAuthorized(false);
     setDriveFiles([]);
     setSearchResults([]);
+    setSelectedFolder(null);
+    localStorage.removeItem('cognitiveCanvasFolder');
     setAuthStatus('unauthenticated');
     window.google.accounts.id.disableAutoSelect();
+  };
+
+  const pickerCallback = (data: any) => {
+    if (data.action === window.google.picker.Action.PICKED) {
+      const folder = data.docs[0];
+      const folderData = { id: folder.id, name: folder.name };
+      setSelectedFolder(folderData);
+      localStorage.setItem('cognitiveCanvasFolder', JSON.stringify(folderData));
+      listDriveFiles(folder.id);
+    }
+  };
+
+  const showPicker = () => {
+    if (!window.gapi || !isAuthorized) return;
+    const accessToken = window.gapi.auth.getToken().access_token;
+    const view = new window.google.picker.View(window.google.picker.ViewId.FOLDERS);
+    view.setMimeTypes("application/vnd.google-apps.folder");
+    
+    const picker = new window.google.picker.PickerBuilder()
+        .enableFeature(window.google.picker.Feature.NAV_HIDDEN)
+        .setAppId(CLIENT_ID.split('-')[0])
+        .setOAuthToken(accessToken)
+        .setDeveloperKey(process.env.API_KEY) // You'll need to enable Picker API & provide key
+        .addView(view)
+        .setCallback(pickerCallback)
+        .build();
+    picker.setVisible(true);
   };
 
   const performSearch = useCallback((terms: string[]) => {
@@ -143,9 +187,8 @@ const App: React.FC = () => {
     setIsLoading(true);
 
     const lowerCaseTerms = terms.map(t => t.toLowerCase());
-    const allItems = [...mockLibrary, ...driveFiles];
     
-    const libraryResults = allItems.filter(item => {
+    const libraryResults = driveFiles.filter(item => {
       return lowerCaseTerms.some(term => 
         item.title.toLowerCase().includes(term) ||
         item.description.toLowerCase().includes(term) ||
@@ -178,7 +221,7 @@ const App: React.FC = () => {
         setIsLoading(true);
         const queries = await generateSearchQueries(transcript);
         performSearch(queries);
-    }, 1000); // Debounce
+    }, 1000);
   }, [performSearch]);
 
   const { transcript, isListening, startListening, stopListening } = useSpeechRecognition(handleFinalTranscript);
@@ -196,7 +239,7 @@ const App: React.FC = () => {
         <h1 className="text-xl font-bold bg-gradient-to-r from-brand-blue to-brand-purple text-transparent bg-clip-text">
           Cognitive Canvas
         </h1>
-        {view === 'main' && (
+        {view === 'main' && selectedFolder && (
           <form onSubmit={handleManualSearch} className="flex-1 max-w-md relative">
             <input
               type="text"
@@ -209,22 +252,30 @@ const App: React.FC = () => {
           </form>
         )}
         <div className="flex items-center gap-4">
-            <nav>
-                <button 
-                    onClick={() => setView('main')} 
-                    className={`px-3 py-1 rounded-md text-sm ${view === 'main' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
-                >
-                    Dashboard
-                </button>
-                <button 
-                    onClick={() => setView('library')} 
-                    className={`px-3 py-1 rounded-md text-sm ${view === 'library' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
-                >
-                    My Library
-                </button>
-            </nav>
+            {selectedFolder && (
+                <nav>
+                    <button 
+                        onClick={() => setView('main')} 
+                        className={`px-3 py-1 rounded-md text-sm ${view === 'main' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        Dashboard
+                    </button>
+                    <button 
+                        onClick={() => setView('library')} 
+                        className={`px-3 py-1 rounded-md text-sm ${view === 'library' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        My Library
+                    </button>
+                </nav>
+            )}
             {user && (
                 <div className="flex items-center gap-2">
+                    {selectedFolder && (
+                      <div className="text-xs text-gray-400 flex items-center gap-1.5 bg-gray-800 px-2 py-1 rounded-md">
+                        <DriveIcon className="w-4 h-4" />
+                        <span>{selectedFolder.name}</span>
+                      </div>
+                    )}
                     <img src={user.picture} alt="user avatar" className="w-8 h-8 rounded-full" />
                     <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-white">Logout</button>
                 </div>
@@ -237,9 +288,9 @@ const App: React.FC = () => {
   const LibraryView = () => (
     <div className="p-8">
         <h2 className="text-3xl font-bold mb-2">My Media Library</h2>
-        <p className="text-gray-400 mb-6">Showing items from your local library and connected Google Drive.</p>
+        <p className="text-gray-400 mb-6">Showing items from your connected Google Drive folder: "{selectedFolder?.name}"</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-            {[...mockLibrary, ...driveFiles].map(item => (
+            {driveFiles.map(item => (
                 <ResultCard key={item.id} result={item} onClick={setSelectedResult} />
             ))}
         </div>
@@ -275,13 +326,13 @@ const App: React.FC = () => {
               ))}
             </div>
           ) : (
-            !isLoading && <div className="text-center text-gray-400 pt-10">{isAuthorized ? "Results will appear here as you speak." : "Grant Google Drive access to see all results."}</div>
+            !isLoading && <div className="text-center text-gray-400 pt-10">Results will appear here as you speak.</div>
           )}
         </div>
       </div>
     </div>
   );
-
+  
   const LoginView = () => {
     useEffect(() => {
         if(authStatus === 'unauthenticated' && window.google) {
@@ -306,9 +357,34 @@ const App: React.FC = () => {
         </div>
     );
   };
+  
+  const ConnectFolderView = () => (
+    <div className="flex flex-col items-center justify-center text-center p-4 h-[calc(100vh-80px)]">
+      <h2 className="text-3xl font-bold text-white mb-3">One Last Step</h2>
+      <p className="text-gray-400 max-w-lg mb-8">
+        To personalize your experience, please connect a Google Drive folder. The app will search for relevant media within this folder as you speak.
+      </p>
+      <button 
+        onClick={showPicker}
+        className="inline-flex items-center gap-2 bg-brand-blue text-white font-semibold px-6 py-3 rounded-lg hover:bg-brand-blue/80 transition-colors"
+      >
+        <DriveIcon className="w-5 h-5" />
+        Connect Google Drive Folder
+      </button>
+    </div>
+  );
 
   if (!user) {
     return <LoginView />;
+  }
+
+  if (!selectedFolder) {
+    return (
+        <div className="min-h-screen bg-gray-900 text-gray-100 font-sans">
+            <Header />
+            <ConnectFolderView />
+        </div>
+    );
   }
 
   return (
