@@ -1,0 +1,7 @@
+{
+  "name": "Cognitive Canvas",
+  "description": "A real-time voice-powered assistant that transcribes your speech, automatically searches your personal media library and the web for relevant context, and displays results instantly for presentation.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
