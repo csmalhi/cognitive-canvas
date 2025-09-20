@@ -1,15 +1,16 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 
-// Assume process.env.API_KEY is configured in the environment
-const API_KEY = process.env.API_KEY;
+// Use the API Key provided by the user. In a production app, this should
+// be managed securely, for example, through environment variables.
+export const API_KEY = "AIzaSyAHHm1Tsy8Sd9KrKhlGbmq7EaA2y7wTaDI";
 
 if (!API_KEY) {
-  // In a real app, you'd want to handle this more gracefully.
-  // For this context, we can proceed, and calls will fail if no key is provided.
-  console.warn("API_KEY environment variable not set for Gemini.");
+  // This warning is unlikely to be triggered now but is kept for good practice.
+  console.warn("API_KEY is not set.");
 }
 
+// The API key might be undefined here if not set, but the GoogleGenAI client can be initialized.
+// Subsequent API calls will fail, which is handled in the functions using it.
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 export const generateSearchQueries = async (text: string): Promise<string[]> => {

@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { SearchResult, MediaType, LibraryItem } from './types';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
-import { generateSearchQueries } from './services/geminiService';
+import { generateSearchQueries, API_KEY } from './services/geminiService';
 import { MicIcon, SearchIcon, DriveIcon } from './components/icons';
 import { ResultCard } from './components/ResultCard';
 import { FullScreenModal } from './components/FullScreenModal';
@@ -29,7 +29,7 @@ const App: React.FC = () => {
   const [authStatus, setAuthStatus] = useState('loading'); // loading, unauthenticated, authenticated
   const [selectedFolder, setSelectedFolder] = useState<{id: string, name: string} | null>(null);
   const tokenClient = useRef<any>(null);
-
+  const signInContainerRef = useRef<HTMLDivElement>(null);
   const searchTimeoutRef = useRef<number | null>(null);
 
   const mapDriveFileToLibraryItem = (file: any): LibraryItem => {
@@ -71,6 +71,7 @@ const App: React.FC = () => {
       console.error(tokenResponse.error);
       return;
     }
+    window.gapi.client.setToken(tokenResponse);
     setIsAuthorized(true);
     // Check for a saved folder after authorization is confirmed
     const savedFolderJson = localStorage.getItem('cognitiveCanvasFolder');
@@ -143,6 +144,24 @@ const App: React.FC = () => {
     }
   }, [handleCredentialResponse]);
 
+  useEffect(() => {
+    if (authStatus === 'unauthenticated' && signInContainerRef.current) {
+        if (window.google?.accounts?.id) {
+            window.google.accounts.id.renderButton(
+                signInContainerRef.current,
+                {
+                    type: 'standard',
+                    shape: 'rectangular',
+                    theme: 'outline',
+                    text: 'signin_with',
+                    size: 'large',
+                    logo_alignment: 'left',
+                }
+            );
+        }
+    }
+  }, [authStatus]);
+
 
   const handleLogout = () => {
     setUser(null);
@@ -167,7 +186,14 @@ const App: React.FC = () => {
 
   const showPicker = () => {
     if (!window.gapi || !isAuthorized) return;
-    const accessToken = window.gapi.auth.getToken().access_token;
+    const token = window.gapi.client.getToken();
+    if (!token) {
+      console.error("Authentication token not found.");
+      // Attempt to re-authorize
+      tokenClient.current.requestAccessToken();
+      return;
+    }
+    const accessToken = token.access_token;
     const view = new window.google.picker.View(window.google.picker.ViewId.FOLDERS);
     view.setMimeTypes("application/vnd.google-apps.folder");
     
@@ -175,7 +201,7 @@ const App: React.FC = () => {
         .enableFeature(window.google.picker.Feature.NAV_HIDDEN)
         .setAppId(CLIENT_ID.split('-')[0])
         .setOAuthToken(accessToken)
-        .setDeveloperKey(process.env.API_KEY) // You'll need to enable Picker API & provide key
+        .setDeveloperKey(API_KEY)
         .addView(view)
         .setCallback(pickerCallback)
         .build();
@@ -198,34 +224,35 @@ const App: React.FC = () => {
     });
 
     const webImageResults: SearchResult[] = lowerCaseTerms.map(term => ({
-        id: `web-${term}-${Date.now()}`,
-        type: 'image',
-        title: `Web Search: ${term}`,
-        description: `An image from the web related to "${term}".`,
-        tags: ['web', 'image', term],
-        url: `https://picsum.photos/seed/${term}/800/600`,
+      id: `web-${term}`,
+      type: 'image',
+      title: `Web Search: ${term}`,
+      description: `An image from the web related to "${term}".`,
+      tags: ['web', 'image', term],
+      url: `https://picsum.photos/seed/${term}/400/300`,
     }));
-    
-    const combinedResults = [...libraryResults, ...webImageResults];
-    const uniqueResults = Array.from(new Map(combinedResults.map(item => [item.id, item])).values());
 
-    setSearchResults(uniqueResults);
+    setSearchResults([...libraryResults, ...webImageResults]);
     setIsLoading(false);
   }, [driveFiles]);
 
-  const handleFinalTranscript = useCallback((transcript: string) => {
-    if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef.current);
+  const onFinalTranscript = useCallback((transcript: string) => {
+    if (transcript) {
+      setIsLoading(true);
+      generateSearchQueries(transcript)
+        .then(queries => {
+          if (queries.length > 0) {
+            performSearch(queries);
+          } else {
+            setIsLoading(false);
+          }
+        })
+        .catch(() => setIsLoading(false));
     }
-    searchTimeoutRef.current = window.setTimeout(async () => {
-        setIsLoading(true);
-        const queries = await generateSearchQueries(transcript);
-        performSearch(queries);
-    }, 1000);
   }, [performSearch]);
 
-  const { transcript, isListening, startListening, stopListening } = useSpeechRecognition(handleFinalTranscript);
-
+  const { transcript, isListening, startListening, stopListening } = useSpeechRecognition(onFinalTranscript);
+  
   const handleManualSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (manualQuery.trim()) {
@@ -233,166 +260,126 @@ const App: React.FC = () => {
     }
   };
 
-  const Header = () => (
-    <header className="p-4 bg-gray-900/80 backdrop-blur-sm sticky top-0 z-10 border-b border-gray-700">
-      <div className="max-w-7xl mx-auto flex justify-between items-center gap-4">
-        <h1 className="text-xl font-bold bg-gradient-to-r from-brand-blue to-brand-purple text-transparent bg-clip-text">
-          Cognitive Canvas
-        </h1>
-        {view === 'main' && selectedFolder && (
-          <form onSubmit={handleManualSearch} className="flex-1 max-w-md relative">
-            <input
-              type="text"
-              value={manualQuery}
-              onChange={(e) => setManualQuery(e.target.value)}
-              placeholder="Manually search your library..."
-              className="w-full bg-gray-800 border border-gray-700 rounded-full py-2 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-brand-blue"
-            />
-            <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-          </form>
-        )}
-        <div className="flex items-center gap-4">
-            {selectedFolder && (
-                <nav>
-                    <button 
-                        onClick={() => setView('main')} 
-                        className={`px-3 py-1 rounded-md text-sm ${view === 'main' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
-                    >
-                        Dashboard
-                    </button>
-                    <button 
-                        onClick={() => setView('library')} 
-                        className={`px-3 py-1 rounded-md text-sm ${view === 'library' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
-                    >
-                        My Library
-                    </button>
-                </nav>
-            )}
-            {user && (
-                <div className="flex items-center gap-2">
-                    {selectedFolder && (
-                      <div className="text-xs text-gray-400 flex items-center gap-1.5 bg-gray-800 px-2 py-1 rounded-md">
-                        <DriveIcon className="w-4 h-4" />
-                        <span>{selectedFolder.name}</span>
-                      </div>
-                    )}
-                    <img src={user.picture} alt="user avatar" className="w-8 h-8 rounded-full" />
-                    <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-white">Logout</button>
-                </div>
-            )}
-        </div>
-      </div>
-    </header>
-  );
-
-  const LibraryView = () => (
-    <div className="p-8">
-        <h2 className="text-3xl font-bold mb-2">My Media Library</h2>
-        <p className="text-gray-400 mb-6">Showing items from your connected Google Drive folder: "{selectedFolder?.name}"</p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-            {driveFiles.map(item => (
-                <ResultCard key={item.id} result={item} onClick={setSelectedResult} />
-            ))}
-        </div>
-    </div>
-  );
-
-  const MainView = () => (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 p-8 h-[calc(100vh-80px)]">
-      {/* Left: Transcription */}
-      <div className="flex flex-col bg-gray-800 rounded-lg p-6">
-        <div className="flex-1 mb-4 overflow-y-auto">
-          <p className="text-lg text-gray-300 whitespace-pre-wrap">{transcript || "Press the microphone to start speaking..."}</p>
-        </div>
-        <button
-          onClick={isListening ? stopListening : startListening}
-          className={`mt-auto w-20 h-20 rounded-full flex items-center justify-center self-center transition-colors duration-300 ${
-            isListening ? 'bg-red-500 animate-pulse-fast' : 'bg-brand-blue hover:bg-brand-blue/80'
-          }`}
-        >
-          <MicIcon className="w-8 h-8 text-white" />
-        </button>
-      </div>
-
-      {/* Right: Results */}
-      <div className="flex flex-col bg-gray-800 rounded-lg p-6">
-        <h2 className="text-2xl font-bold mb-4">Contextual Results</h2>
-        {isLoading && <div className="text-center p-4">Searching...</div>}
-        <div className="flex-1 overflow-y-auto">
-          {searchResults.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {searchResults.map(result => (
-                <ResultCard key={result.id} result={result} onClick={setSelectedResult} />
-              ))}
-            </div>
-          ) : (
-            !isLoading && <div className="text-center text-gray-400 pt-10">Results will appear here as you speak.</div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-  
-  const LoginView = () => {
-    useEffect(() => {
-        if(authStatus === 'unauthenticated' && window.google) {
-            window.google.accounts.id.renderButton(
-                document.getElementById('signInDiv'),
-                { theme: 'outline', size: 'large' }
-            );
-        }
-    }, [authStatus]);
-    
-    return (
-        <div className="min-h-screen flex flex-col items-center justify-center text-center p-4">
-            <h1 className="text-4xl font-bold bg-gradient-to-r from-brand-blue to-brand-purple text-transparent bg-clip-text mb-4">
-              Welcome to Cognitive Canvas
-            </h1>
-            <p className="text-gray-400 max-w-xl mb-8">
-              Your real-time voice assistant. Sign in with your Google account to get started and connect to your personal media library in Google Drive.
-            </p>
-            {authStatus === 'loading' && <div>Loading...</div>}
-            {authStatus === 'error' && <div className="text-red-500">Could not load Google Sign-In. Please try again later.</div>}
-            <div id="signInDiv"></div>
-        </div>
-    );
+  const debouncedManualSearch = (query: string) => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    searchTimeoutRef.current = window.setTimeout(() => {
+      if (query.trim()) {
+        performSearch(query.trim().split(' '));
+      } else {
+        setSearchResults([]);
+      }
+    }, 500);
   };
-  
-  const ConnectFolderView = () => (
-    <div className="flex flex-col items-center justify-center text-center p-4 h-[calc(100vh-80px)]">
-      <h2 className="text-3xl font-bold text-white mb-3">One Last Step</h2>
-      <p className="text-gray-400 max-w-lg mb-8">
-        To personalize your experience, please connect a Google Drive folder. The app will search for relevant media within this folder as you speak.
-      </p>
-      <button 
-        onClick={showPicker}
-        className="inline-flex items-center gap-2 bg-brand-blue text-white font-semibold px-6 py-3 rounded-lg hover:bg-brand-blue/80 transition-colors"
-      >
-        <DriveIcon className="w-5 h-5" />
-        Connect Google Drive Folder
-      </button>
+
+  const handleManualQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setManualQuery(e.target.value);
+    debouncedManualSearch(e.target.value);
+  }
+
+  const LoginView = () => (
+    <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
+        <h1 className="text-4xl font-bold mb-2">Cognitive Canvas</h1>
+        <p className="text-gray-400 mb-8">Your real-time contextual assistant.</p>
+        {authStatus === 'loading' && <p>Loading...</p>}
+        {authStatus === 'error' && <p className="text-red-500">Error loading Google services. Please refresh.</p>}
+        {authStatus === 'unauthenticated' && <div ref={signInContainerRef} />}
     </div>
   );
 
   if (!user) {
     return <LoginView />;
   }
-
+  
   if (!selectedFolder) {
     return (
-        <div className="min-h-screen bg-gray-900 text-gray-100 font-sans">
-            <Header />
-            <ConnectFolderView />
+        <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
+            <h1 className="text-3xl font-bold mb-4">Connect Your Library</h1>
+            <p className="text-gray-400 mb-8">Select a Google Drive folder to use as your personal library.</p>
+            <button
+                onClick={showPicker}
+                disabled={!isAuthorized}
+                className="inline-flex items-center gap-3 bg-brand-blue text-white font-semibold px-6 py-3 rounded-lg hover:bg-brand-blue/80 transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
+            >
+                <DriveIcon className="w-6 h-6" />
+                Connect Google Drive Folder
+            </button>
+            <p className="text-sm text-gray-500 mt-4">{!isAuthorized ? 'Authorizing with Google Drive...' : 'Ready to connect.'}</p>
         </div>
     );
   }
 
   return (
-    <main className="min-h-screen bg-gray-900 text-gray-100 font-sans">
-      <Header />
-      {view === 'main' ? <MainView /> : <LibraryView />}
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
+       <header className="fixed top-0 left-0 right-0 bg-gray-900/80 backdrop-blur-md z-40">
+        <div className="container mx-auto px-4 py-3 flex justify-between items-center">
+        <div className="flex items-center gap-3">
+            <h1 className="text-xl font-bold from-brand-blue to-brand-purple bg-gradient-to-r bg-clip-text text-transparent">
+              Cognitive Canvas
+            </h1>
+            <div className="flex items-center gap-2 text-sm bg-gray-800 px-3 py-1 rounded-full">
+                <DriveIcon className="w-4 h-4 text-gray-400"/>
+                <span className="text-gray-300">{selectedFolder.name}</span>
+            </div>
+        </div>
+          <div className="flex items-center gap-4">
+            {user && (
+                <div className="flex items-center gap-2 text-sm">
+                    <img src={user.picture} alt="user avatar" className="w-8 h-8 rounded-full" />
+                    <span className="text-gray-300 hidden sm:inline">{user.given_name}</span>
+                </div>
+            )}
+            <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-white">Logout</button>
+          </div>
+        </div>
+      </header>
+
+      <main className="container mx-auto px-4 pt-24 flex-1">
+        <div className="flex justify-center mb-8">
+          <button
+            onClick={isListening ? stopListening : startListening}
+            className={`relative flex items-center justify-center w-24 h-24 rounded-full transition-colors duration-300 ${isListening ? 'bg-red-600 hover:bg-red-700' : 'bg-brand-blue hover:bg-brand-blue/80'}`}
+          >
+            <MicIcon className="w-10 h-10" />
+            {isListening && <div className="absolute inset-0 rounded-full bg-red-500/50 animate-pulse-fast"></div>}
+          </button>
+        </div>
+        <p className="text-center min-h-6 mb-8 text-gray-400 italic">{transcript || "Click the mic and start talking..."}</p>
+
+        <div className="relative mb-12">
+          <form onSubmit={handleManualSearch}>
+            <input
+              type="text"
+              value={manualQuery}
+              onChange={handleManualQueryChange}
+              placeholder="Or type your search here..."
+              className="w-full bg-gray-800 border-2 border-gray-700 rounded-full py-3 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-brand-purple focus:border-transparent"
+            />
+          </form>
+          <SearchIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 text-gray-400" />
+        </div>
+        
+        <div className="mb-4">
+          <button onClick={() => setView('main')} className={`px-4 py-2 rounded-t-lg ${view === 'main' ? 'bg-gray-800' : 'bg-gray-700/50'}`}>Search Results</button>
+          <button onClick={() => setView('library')} className={`px-4 py-2 rounded-t-lg ${view === 'library' ? 'bg-gray-800' : 'bg-gray-700/50'}`}>My Library</button>
+        </div>
+
+        <div className="bg-gray-800 p-4 rounded-b-lg rounded-tr-lg">
+            {isLoading && <p className="text-center">Searching...</p>}
+            {!isLoading && view === 'main' && searchResults.length === 0 && <p className="text-center text-gray-500">No search results yet. Speak or type to search.</p>}
+            {!isLoading && view === 'library' && driveFiles.length === 0 && <p className="text-center text-gray-500">Your connected library is empty.</p>}
+            
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                {(view === 'main' ? searchResults : driveFiles).map((result) => (
+                    <ResultCard key={result.id} result={result} onClick={setSelectedResult} />
+                ))}
+            </div>
+        </div>
+      </main>
+
       <FullScreenModal result={selectedResult} onClose={() => setSelectedResult(null)} />
-    </main>
+    </div>
   );
 };
 
